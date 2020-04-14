@@ -16,6 +16,15 @@
  */
 package com.alipay.sofa.registry.server.session.scheduler.task;
 
+import java.net.InetSocketAddress;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.stream.Collectors;
+
 import com.alipay.sofa.registry.common.model.Node.NodeType;
 import com.alipay.sofa.registry.common.model.dataserver.Datum;
 import com.alipay.sofa.registry.common.model.store.BaseInfo.ClientVersion;
@@ -26,6 +35,7 @@ import com.alipay.sofa.registry.core.model.ScopeEnum;
 import com.alipay.sofa.registry.log.Logger;
 import com.alipay.sofa.registry.log.LoggerFactory;
 import com.alipay.sofa.registry.server.session.bootstrap.SessionServerConfig;
+import com.alipay.sofa.registry.server.session.cache.CacheAccessException;
 import com.alipay.sofa.registry.server.session.cache.CacheService;
 import com.alipay.sofa.registry.server.session.cache.DatumKey;
 import com.alipay.sofa.registry.server.session.cache.Key;
@@ -41,15 +51,6 @@ import com.alipay.sofa.registry.task.batcher.TaskProcessor.ProcessingResult;
 import com.alipay.sofa.registry.task.listener.TaskEvent;
 import com.alipay.sofa.registry.task.listener.TaskEvent.TaskType;
 import com.alipay.sofa.registry.task.listener.TaskListenerManager;
-
-import java.net.InetSocketAddress;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.stream.Collectors;
 
 /**
  *
@@ -151,14 +152,19 @@ public class DataChangeFetchCloudTask extends AbstractSessionTask {
     }
 
     public PushTaskClosure getTaskClosure(Map<String/*dataCenter*/, Datum> datumMap) {
-        PushTaskClosure pushTaskClosure = new PushTaskClosure(executorManager.getPushTaskClosureExecutor());
+
+        PushTaskClosure pushTaskClosure = new PushTaskClosure(executorManager.getPushTaskCheckAsyncHashedWheelTimer(),
+                sessionServerConfig, fetchDataInfoId);
         pushTaskClosure.setTaskClosure((status, task) -> {
             if (status == ProcessingResult.Success) {
                 if (sessionServerConfig.isStopPushSwitch()) {
                     LOGGER.info("Stop Push switch on,dataInfoId {} version can not be update!", fetchDataInfoId);
                     return;
                 }
+                List<String> dataCenters = sessionInterests.getDataCenters();
                 datumMap.forEach((dataCenter, datum) -> {
+                    dataCenters.remove(dataCenter);
+
                     String dataInfoId = fetchDataInfoId;
                     Long version = datum.getVersion();
                     boolean result = sessionInterests.checkAndUpdateInterestVersions(dataCenter, dataInfoId, version);
@@ -168,10 +174,20 @@ public class DataChangeFetchCloudTask extends AbstractSessionTask {
                     } else {
                         LOGGER.info(
                                 "Push all tasks success,but dataCenter:{} dataInfoId:{} version:{} need not update!",
-                                dataCenter,
-                                dataInfoId, version);
+                                dataCenter, dataInfoId, version);
                     }
                 });
+
+                // now, elements left in dataCenters, means that datum of the dataCenter,
+                // cannot be obtained from DataServer this time, it may cause pushing empty datum wrongly,
+                // so it is necessary to ensure that it can be checked later
+                dataCenters.forEach(dataCenter -> {
+                    boolean result = sessionInterests.checkAndUpdateInterestVersionZero(dataCenter, fetchDataInfoId);
+                    LOGGER.warn(
+                            "Obtained datum from DataServer({}) failed, set sessionInterests dataInfoId({}) version zero, return {}",
+                            dataCenter, fetchDataInfoId, result);
+                });
+
             } else {
                 LOGGER.warn("Push tasks found error,subscribers version can not be update!dataInfoId={}",
                         fetchDataInfoId);
@@ -204,7 +220,12 @@ public class DataChangeFetchCloudTask extends AbstractSessionTask {
                             new DatumKey(fetchDataInfoId, dataCenter))).
                     collect(Collectors.toList());
 
-            Map<Key, Value> values = sessionCacheService.getValues(keys);
+            Map<Key, Value> values = null;
+            try {
+                values = sessionCacheService.getValues(keys);
+            } catch (CacheAccessException e) {
+                LOGGER.error(String.format("error when access cache: %s", e.getMessage()), e);
+            }
 
             if (values != null) {
                 values.forEach((key, value) -> {

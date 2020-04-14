@@ -16,23 +16,28 @@
  */
 package com.alipay.sofa.registry.server.session.store;
 
+import java.net.InetSocketAddress;
+import java.util.Collection;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.stream.Collectors;
+
+import org.springframework.beans.factory.annotation.Autowired;
+
 import com.alipay.sofa.registry.common.model.store.Subscriber;
+import com.alipay.sofa.registry.common.model.store.WordCache;
 import com.alipay.sofa.registry.core.model.ScopeEnum;
 import com.alipay.sofa.registry.log.Logger;
 import com.alipay.sofa.registry.log.LoggerFactory;
 import com.alipay.sofa.registry.server.session.bootstrap.SessionServerConfig;
 import com.alipay.sofa.registry.server.session.cache.SubscriberResult;
 import com.alipay.sofa.registry.util.VersionsMapUtils;
-import org.springframework.beans.factory.annotation.Autowired;
-
-import java.net.InetSocketAddress;
-import java.util.Collection;
-import java.util.Iterator;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
+import com.google.common.collect.Lists;
 
 /**
  *
@@ -71,6 +76,7 @@ public class SessionInterests implements Interests, ReSubscribers {
 
     @Override
     public void add(Subscriber subscriber) {
+        Subscriber.internSubscriber(subscriber);
 
         write.lock();
         try {
@@ -206,8 +212,6 @@ public class SessionInterests implements Interests, ReSubscribers {
         Map<String, Subscriber> subscribers = interests.get(dataInfoId);
 
         if (subscribers == null || subscribers.isEmpty()) {
-            LOGGER.info("There are not Subscriber Existed! Who are interest with dataInfoId {} !",
-                dataInfoId);
             return false;
         }
 
@@ -231,6 +235,7 @@ public class SessionInterests implements Interests, ReSubscribers {
     public boolean checkAndUpdateInterestVersions(String dataCenter, String dataInfoId, Long version) {
         read.lock();
         try {
+            dataInfoId = WordCache.getInstance().getWordCache(dataInfoId);
 
             Map<String, Subscriber> subscribers = interests.get(dataInfoId);
 
@@ -250,11 +255,18 @@ public class SessionInterests implements Interests, ReSubscribers {
                     dataInfoVersions = newDataInfoVersions;
                 }
             }
-
+            //set zero
+            if (version.longValue() == 0l) {
+                return dataInfoVersions.put(dataInfoId, version) != null;
+            }
             return VersionsMapUtils.checkAndUpdateVersions(dataInfoVersions, dataInfoId, version);
         } finally {
             read.unlock();
         }
+    }
+
+    public boolean checkAndUpdateInterestVersionZero(String dataCenter, String dataInfoId) {
+        return checkAndUpdateInterestVersions(dataCenter, dataInfoId, 0l);
     }
 
     @Override
@@ -278,8 +290,9 @@ public class SessionInterests implements Interests, ReSubscribers {
     }
 
     private void addConnectIndex(Subscriber subscriber) {
-
         String connectId = subscriber.getSourceAddress().getAddressString();
+        connectId = WordCache.getInstance().getWordCache(connectId);
+
         Map<String/*registerId*/, Subscriber> subscriberMap = connectIndex.get(connectId);
         if (subscriberMap == null) {
             Map<String/*registerId*/, Subscriber> newSubscriberMap = new ConcurrentHashMap<>();
@@ -428,6 +441,11 @@ public class SessionInterests implements Interests, ReSubscribers {
         stopPushInterests.clear();
     }
 
+    @Override
+    public Map<String, Map<String, Subscriber>> getConnectSubscribers() {
+        return connectIndex;
+    }
+
     public SessionServerConfig getSessionServerConfig() {
         return sessionServerConfig;
     }
@@ -440,4 +458,14 @@ public class SessionInterests implements Interests, ReSubscribers {
     public void setSessionServerConfig(SessionServerConfig sessionServerConfig) {
         this.sessionServerConfig = sessionServerConfig;
     }
+
+    @Override
+    public List<String> getDataCenters() {
+        if (interestVersions != null) {
+            return interestVersions.keySet().stream().collect(Collectors.toList());
+        } else {
+            return Lists.newArrayList();
+        }
+    }
+
 }

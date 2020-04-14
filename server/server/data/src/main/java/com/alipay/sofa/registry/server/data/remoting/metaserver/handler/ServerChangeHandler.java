@@ -16,23 +16,27 @@
  */
 package com.alipay.sofa.registry.server.data.remoting.metaserver.handler;
 
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
+
+import org.springframework.beans.factory.annotation.Autowired;
+
 import com.alipay.sofa.registry.common.model.CommonResponse;
 import com.alipay.sofa.registry.common.model.Node;
 import com.alipay.sofa.registry.common.model.Node.NodeType;
 import com.alipay.sofa.registry.common.model.metaserver.MetaNode;
 import com.alipay.sofa.registry.common.model.metaserver.NodeChangeResult;
+import com.alipay.sofa.registry.log.Logger;
+import com.alipay.sofa.registry.log.LoggerFactory;
 import com.alipay.sofa.registry.remoting.Channel;
 import com.alipay.sofa.registry.server.data.bootstrap.DataServerConfig;
 import com.alipay.sofa.registry.server.data.event.DataServerChangeEvent;
+import com.alipay.sofa.registry.server.data.event.DataServerChangeEvent.FromType;
 import com.alipay.sofa.registry.server.data.event.EventCenter;
 import com.alipay.sofa.registry.server.data.event.MetaServerChangeEvent;
 import com.alipay.sofa.registry.server.data.executor.ExecutorFactory;
 import com.alipay.sofa.registry.server.data.remoting.handler.AbstractClientHandler;
-import org.springframework.beans.factory.annotation.Autowired;
-
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Set;
 
 /**
  *
@@ -41,11 +45,13 @@ import java.util.Set;
  */
 public class ServerChangeHandler extends AbstractClientHandler<NodeChangeResult> {
 
-    @Autowired
-    private EventCenter      eventCenter;
+    private static final Logger LOGGER = LoggerFactory.getLogger(ServerChangeHandler.class);
 
     @Autowired
-    private DataServerConfig dataServerConfig;
+    private EventCenter         eventCenter;
+
+    @Autowired
+    private DataServerConfig    dataServerConfig;
 
     @Override
     public void checkParam(NodeChangeResult request) throws RuntimeException {
@@ -54,10 +60,11 @@ public class ServerChangeHandler extends AbstractClientHandler<NodeChangeResult>
 
     @Override
     public Object doHandle(Channel channel, NodeChangeResult request) {
+        LOGGER.info("Received NodeChangeResult: {}", request);
         ExecutorFactory.getCommonExecutor().execute(() -> {
             if (request.getNodeType() == NodeType.DATA) {
                 eventCenter.post(new DataServerChangeEvent(request.getNodes(),
-                        request.getDataCenterListVersions()));
+                        request.getDataCenterListVersions(), FromType.META_NOTIFY));
             } else if (request.getNodeType() == NodeType.META) {
                 Map<String, Map<String, MetaNode>> metaNodesMap = request.getNodes();
                 if (metaNodesMap != null && !metaNodesMap.isEmpty()) {

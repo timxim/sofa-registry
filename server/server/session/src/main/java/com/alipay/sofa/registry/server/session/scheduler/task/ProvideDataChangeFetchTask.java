@@ -16,12 +16,10 @@
  */
 package com.alipay.sofa.registry.server.session.scheduler.task;
 
-import com.alipay.sofa.registry.common.model.constants.ValueConstants;
 import com.alipay.sofa.registry.common.model.metaserver.DataOperator;
 import com.alipay.sofa.registry.common.model.metaserver.NotifyProvideDataChange;
 import com.alipay.sofa.registry.common.model.metaserver.ProvideData;
 import com.alipay.sofa.registry.common.model.store.DataInfo;
-import com.alipay.sofa.registry.common.model.store.Subscriber;
 import com.alipay.sofa.registry.common.model.store.URL;
 import com.alipay.sofa.registry.common.model.store.Watcher;
 import com.alipay.sofa.registry.core.model.ReceivedConfigData;
@@ -34,22 +32,17 @@ import com.alipay.sofa.registry.remoting.exchange.Exchange;
 import com.alipay.sofa.registry.server.session.bootstrap.SessionServerConfig;
 import com.alipay.sofa.registry.server.session.converter.ReceivedDataConverter;
 import com.alipay.sofa.registry.server.session.node.service.MetaNodeService;
-import com.alipay.sofa.registry.server.session.registry.Registry;
-import com.alipay.sofa.registry.server.session.store.Interests;
-import com.alipay.sofa.registry.server.session.store.ReSubscribers;
+import com.alipay.sofa.registry.server.session.provideData.ProvideDataProcessor;
 import com.alipay.sofa.registry.server.session.store.Watchers;
 import com.alipay.sofa.registry.task.listener.TaskEvent;
 import com.alipay.sofa.registry.task.listener.TaskEvent.TaskType;
 import com.alipay.sofa.registry.task.listener.TaskListenerManager;
-import org.springframework.util.CollectionUtils;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 
 /**
  *
@@ -78,24 +71,21 @@ public class ProvideDataChangeFetchTask extends AbstractSessionTask {
 
     private final Exchange            boltExchange;
 
-    private final Interests           sessionInterests;
-
-    private final Registry            sessionRegistry;
-
     private NotifyProvideDataChange   notifyProvideDataChange;
+
+    private ProvideDataProcessor      provideDataProcessorManager;
 
     public ProvideDataChangeFetchTask(SessionServerConfig sessionServerConfig,
                                       TaskListenerManager taskListenerManager,
                                       MetaNodeService metaNodeService, Watchers sessionWatchers,
-                                      Exchange boltExchange, Interests sessionInterests,
-                                      Registry sessionRegistry) {
+                                      Exchange boltExchange,
+                                      ProvideDataProcessor provideDataProcessorManager) {
         this.sessionServerConfig = sessionServerConfig;
         this.taskListenerManager = taskListenerManager;
         this.metaNodeService = metaNodeService;
         this.sessionWatchers = sessionWatchers;
         this.boltExchange = boltExchange;
-        this.sessionInterests = sessionInterests;
-        this.sessionRegistry = sessionRegistry;
+        this.provideDataProcessorManager = provideDataProcessorManager;
     }
 
     @Override
@@ -122,42 +112,12 @@ public class ProvideDataChangeFetchTask extends AbstractSessionTask {
         if (notifyProvideDataChange.getDataOperator() != DataOperator.REMOVE) {
             provideData = metaNodeService.fetchData(dataInfoId);
 
-            if (ValueConstants.STOP_PUSH_DATA_SWITCH_DATA_ID.equals(dataInfoId)) {
-                if (provideData != null) {
-                    if (provideData.getProvideData() == null || provideData.getProvideData().getObject() == null) {
-                        LOGGER.info("Fetch session stop push switch no data existed,config not change!");
-                        return;
-                    }
-                    String data = (String) provideData.getProvideData().getObject();
-                    LOGGER.info("Fetch session stop push data switch {} success!", data);
-
-                    //receive stop push switch off
-                    if (data != null) {
-                        boolean switchData = Boolean.valueOf(data);
-                        boolean ifChange = sessionServerConfig.isStopPushSwitch() != switchData;
-                        sessionServerConfig.setStopPushSwitch(switchData);
-                        if (!switchData) {
-                            //avoid duplicate false receive
-                            if (ifChange) {
-                                fireReSubscriber();
-                            }
-                        } else {
-                            //stop push and stop fetch data task
-                            sessionServerConfig.setBeginDataFetchTask(false);
-                        }
-                    } else {
-                        LOGGER.error("Fetch session stop push data switch is null!");
-                    }
-                    return;
-                } else {
-                    LOGGER.info("Fetch session stop push switch data null,config not change!");
-                }
-                return;
-            }
             if (provideData == null) {
                 LOGGER.warn("Notify provider data Change request {} fetch no provider data!", notifyProvideDataChange);
                 return;
             }
+            provideDataProcessorManager.changeDataProcess(provideData);
+
         }
         DataInfo dataInfo = DataInfo.valueOf(dataInfoId);
 
@@ -177,64 +137,17 @@ public class ProvideDataChangeFetchTask extends AbstractSessionTask {
                 if (!registerIds.isEmpty()) {
                     ReceivedConfigData receivedConfigData;
                     if (notifyProvideDataChange.getDataOperator() == DataOperator.REMOVE) {
-                        receivedConfigData = ReceivedDataConverter.getReceivedConfigData(null, dataInfo,
-                                notifyProvideDataChange.getVersion());
+                        receivedConfigData = ReceivedDataConverter
+                                .getReceivedConfigData(null, dataInfo, notifyProvideDataChange.getVersion());
                     } else {
-                        receivedConfigData = ReceivedDataConverter.getReceivedConfigData(
-                                provideData.getProvideData(), dataInfo, provideData.getVersion());
+                        receivedConfigData = ReceivedDataConverter
+                                .getReceivedConfigData(provideData.getProvideData(), dataInfo,
+                                        provideData.getVersion());
                     }
                     receivedConfigData.setConfiguratorRegistIds(registerIds);
                     firePushTask(receivedConfigData, new URL(channel.getRemoteAddress()));
                 }
             }
-        }
-    }
-
-    /**
-     * open push switch to push all reSubscribers
-     */
-    private void fireReSubscriber() {
-
-        //try catch avoid to error cancel beginDataFetchTask switch on
-        try {
-            //begin push fire data fetch task first,avoid reSubscriber push duplicate
-            sessionRegistry.fetchChangDataProcess();
-        } catch (Throwable e) {
-            LOGGER.error("Open push switch first fetch task execute error",e);
-        }
-
-        try {
-            //wait 1 MINUTES for dataFetch task evict duplicate subscriber push
-            TimeUnit.MINUTES.sleep(1);
-        } catch (InterruptedException e) {
-            LOGGER.error("Wait for dataFetch Task Interrupted!");
-        }
-
-        //fetch task process 1 minutes,can schedule execute fetch task
-        sessionServerConfig.setBeginDataFetchTask(true);
-
-        if (this.sessionInterests instanceof ReSubscribers) {
-            ReSubscribers reSubscriber = (ReSubscribers) sessionInterests;
-
-            Map<String/*dataInfoId*/, Map<String/*registerId*/, Subscriber>> reSubscribers = reSubscriber
-                    .getReSubscribers();
-
-            if (reSubscribers != null && !reSubscribers.isEmpty()) {
-                reSubscribers.forEach(
-                        (dataInfoId, subscribers) -> fireSubscriberMultiFetchTask(dataInfoId, subscribers.values()));
-                reSubscriber.clearReSubscribers();
-            }
-        }
-    }
-
-    private void fireSubscriberMultiFetchTask(String dataInfoId, Collection<Subscriber> subscribers) {
-        //trigger fetch data for subscriber,and push to client node
-        if (!CollectionUtils.isEmpty(subscribers)) {
-            TaskEvent taskEvent = new TaskEvent(dataInfoId, TaskType.SUBSCRIBER_MULTI_FETCH_TASK);
-            taskEvent.setAttribute(Constant.PUSH_CLIENT_SUBSCRIBERS, subscribers);
-            TASK_LOGGER.info("send " + taskEvent.getTaskType()
-                             + " subscribersSize:{},dataInfoId:{}", subscribers.size(), dataInfoId);
-            taskListenerManager.sendTaskEvent(taskEvent);
         }
     }
 

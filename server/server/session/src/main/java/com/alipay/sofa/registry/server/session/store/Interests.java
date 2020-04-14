@@ -16,12 +16,13 @@
  */
 package com.alipay.sofa.registry.server.session.store;
 
-import com.alipay.sofa.registry.common.model.store.Subscriber;
-import com.alipay.sofa.registry.core.model.ScopeEnum;
-
 import java.net.InetSocketAddress;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
+
+import com.alipay.sofa.registry.common.model.store.Subscriber;
+import com.alipay.sofa.registry.core.model.ScopeEnum;
 
 /**
  *
@@ -63,6 +64,14 @@ public interface Interests extends DataManager<Subscriber, String, String> {
     boolean checkAndUpdateInterestVersions(String dataCenter, String dataInfoId, Long version);
 
     /**
+     * set subscribers interest dataInfoId version zero
+     * @param dataCenter
+     * @param dataInfoId
+     * @return
+     */
+    boolean checkAndUpdateInterestVersionZero(String dataCenter, String dataInfoId);
+
+    /**
      * get all subscriber dataInfoIds
      *
      * @return
@@ -85,4 +94,12 @@ public interface Interests extends DataManager<Subscriber, String, String> {
      * @return
      */
     Subscriber queryById(String registerId, String dataInfoId);
+
+    /**
+     * get all subscribers group by connectId
+     * @return
+     */
+    Map<String/*connectId*/, Map<String/*registerId*/, Subscriber>> getConnectSubscribers();
+
+    List<String> getDataCenters();
 }

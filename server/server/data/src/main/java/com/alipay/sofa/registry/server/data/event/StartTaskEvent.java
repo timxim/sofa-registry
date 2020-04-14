@@ -23,7 +23,7 @@ import java.util.Set;
  * @author qian.lqlq
  * @version $Id: StartTaskEvent.java, v 0.1 2018-03-13 15:13 qian.lqlq Exp $
  */
-public class StartTaskEvent {
+public class StartTaskEvent implements Event {
 
     private final Set<StartTaskTypeEnum> suitableTypes;
 

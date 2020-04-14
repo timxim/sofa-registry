@@ -16,12 +16,6 @@
  */
 package com.alipay.sofa.registry.server.data.remoting.dataserver;
 
-import com.alipay.remoting.Connection;
-import com.alipay.sofa.registry.consistency.hash.ConsistentHash;
-import com.alipay.sofa.registry.server.data.bootstrap.DataServerConfig;
-import com.alipay.sofa.registry.server.data.node.DataServerNode;
-import com.google.common.collect.Lists;
-
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -29,6 +23,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+
+import com.alipay.remoting.Connection;
+import com.alipay.sofa.registry.consistency.hash.ConsistentHash;
+import com.alipay.sofa.registry.server.data.bootstrap.DataServerConfig;
+import com.alipay.sofa.registry.server.data.node.DataServerNode;
+import com.google.common.collect.Lists;
 
 /**
  * the factory to hold other dataservers and connection connected to them
@@ -59,14 +59,18 @@ public class DataServerNodeFactory {
      *
      * @param dataServerNode
      */
-    public static void register(DataServerNode dataServerNode,
-                                DataServerConfig dataServerBootstrapConfig) {
+    public static void register(DataServerNode dataServerNode, DataServerConfig dataServerConfig) {
         String dataCenter = dataServerNode.getDataCenter();
-        if (!MAP.containsKey(dataCenter)) {
-            MAP.put(dataCenter, new ConcurrentHashMap<>());
+        Map<String, DataServerNode> dataMap = MAP.get(dataCenter);
+        if (dataMap == null) {
+            Map<String, DataServerNode> newMap = new ConcurrentHashMap<>();
+            dataMap = MAP.putIfAbsent(dataCenter, newMap);
+            if (dataMap == null) {
+                dataMap = newMap;
+            }
         }
-        MAP.get(dataCenter).put(dataServerNode.getIp(), dataServerNode);
-        refreshConsistent(dataCenter, dataServerBootstrapConfig);
+        dataMap.put(dataServerNode.getIp(), dataServerNode);
+        refreshConsistent(dataCenter, dataServerConfig);
     }
 
     /**
@@ -74,31 +78,29 @@ public class DataServerNodeFactory {
      *
      * @param dataCenter
      */
-    public static void refreshConsistent(String dataCenter,
-                                         DataServerConfig dataServerBootstrapConfig) {
+    public static void refreshConsistent(String dataCenter, DataServerConfig dataServerConfig) {
         List<DataServerNode> dataServerNodes = Lists.newArrayList(MAP.get(dataCenter).values());
-        if (dataServerBootstrapConfig.getLocalDataCenter().equals(dataCenter)) {
+        if (dataServerConfig.getLocalDataCenter().equals(dataCenter)) {
             if (!MAP.get(dataCenter).keySet().contains(DataServerConfig.IP)) {
-                dataServerNodes.add(new DataServerNode(DataServerConfig.IP,
-                    dataServerBootstrapConfig.getLocalDataCenter(), null));
+                dataServerNodes.add(new DataServerNode(DataServerConfig.IP, dataServerConfig
+                    .getLocalDataCenter(), null));
             }
         }
         CONSISTENT_HASH_MAP.put(dataCenter,
-            new ConsistentHash<>(dataServerBootstrapConfig.getNumberOfReplicas(), dataServerNodes));
+            new ConsistentHash<>(dataServerConfig.getNumberOfReplicas(), dataServerNodes));
     }
 
     /**
      * for single node consistentHash
-     * @param dataServerBootstrapConfig
+     * @param dataServerConfig
      */
-    public static void initConsistent(DataServerConfig dataServerBootstrapConfig) {
+    public static void initConsistent(DataServerConfig dataServerConfig) {
         if (init.compareAndSet(false, true)) {
             List<DataServerNode> dataServerNodes = Lists.newArrayList();
-            dataServerNodes.add(new DataServerNode(DataServerConfig.IP, dataServerBootstrapConfig
+            dataServerNodes.add(new DataServerNode(DataServerConfig.IP, dataServerConfig
                 .getLocalDataCenter(), null));
-            CONSISTENT_HASH_MAP.put(dataServerBootstrapConfig.getLocalDataCenter(),
-                new ConsistentHash<>(dataServerBootstrapConfig.getNumberOfReplicas(),
-                    dataServerNodes));
+            CONSISTENT_HASH_MAP.put(dataServerConfig.getLocalDataCenter(), new ConsistentHash<>(
+                dataServerConfig.getNumberOfReplicas(), dataServerNodes));
         }
     }
 
@@ -155,8 +157,7 @@ public class DataServerNodeFactory {
      * @param dataCenter
      * @param ip
      */
-    public static void remove(String dataCenter, String ip,
-                              DataServerConfig dataServerBootstrapConfig) {
+    public static void remove(String dataCenter, String ip, DataServerConfig dataServerConfig) {
         if (MAP.containsKey(dataCenter)) {
             Map<String, DataServerNode> map = MAP.get(dataCenter);
             if (map != null) {
@@ -168,7 +169,7 @@ public class DataServerNodeFactory {
                 map.remove(ip);
             }
         }
-        refreshConsistent(dataCenter, dataServerBootstrapConfig);
+        refreshConsistent(dataCenter, dataServerConfig);
     }
 
     /**
@@ -193,7 +194,7 @@ public class DataServerNodeFactory {
     public static DataServerNode computeDataServerNode(String dataCenter, String dataInfoId) {
         ConsistentHash<DataServerNode> consistentHash = CONSISTENT_HASH_MAP.get(dataCenter);
         if (consistentHash != null) {
-            return CONSISTENT_HASH_MAP.get(dataCenter).getNodeFor(dataInfoId);
+            return consistentHash.getNodeFor(dataInfoId);
         }
         return null;
     }
@@ -202,18 +203,9 @@ public class DataServerNodeFactory {
                                                               int backupNodes) {
         ConsistentHash<DataServerNode> consistentHash = CONSISTENT_HASH_MAP.get(dataCenter);
         if (consistentHash != null) {
-            return CONSISTENT_HASH_MAP.get(dataCenter).getNUniqueNodesFor(dataInfoId, backupNodes);
+            return consistentHash.getNUniqueNodesFor(dataInfoId, backupNodes);
         }
         return null;
-    }
-
-    /**
-     * get all datacenters
-     *
-     * @return
-     */
-    public static Set<String> getAllDataCenters() {
-        return MAP.keySet();
     }
 
 }

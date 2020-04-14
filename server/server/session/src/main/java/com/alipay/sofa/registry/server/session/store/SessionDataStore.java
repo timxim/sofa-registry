@@ -16,10 +16,6 @@
  */
 package com.alipay.sofa.registry.server.session.store;
 
-import com.alipay.sofa.registry.common.model.store.Publisher;
-import com.alipay.sofa.registry.log.Logger;
-import com.alipay.sofa.registry.log.LoggerFactory;
-
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.Map;
@@ -27,6 +23,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+
+import com.alipay.sofa.registry.common.model.store.Publisher;
+import com.alipay.sofa.registry.common.model.store.WordCache;
+import com.alipay.sofa.registry.log.Logger;
+import com.alipay.sofa.registry.log.LoggerFactory;
 
 /**
  *
@@ -46,10 +47,12 @@ public class SessionDataStore implements DataStore {
      */
     private Map<String/*dataInfoId*/, Map<String/*registerId*/, Publisher>> registry      = new ConcurrentHashMap<>();
 
+    /*** index */
     private Map<String/*connectId*/, Map<String/*registerId*/, Publisher>>  connectIndex  = new ConcurrentHashMap<>();
 
     @Override
     public void add(Publisher publisher) {
+        Publisher.internPublisher(publisher);
 
         write.lock();
         try {
@@ -103,7 +106,7 @@ public class SessionDataStore implements DataStore {
             }
             publishers.put(publisher.getRegisterId(), publisher);
 
-            addIndex(publisher);
+            addToConnectIndex(publisher);
 
         } finally {
             write.unlock();
@@ -118,21 +121,20 @@ public class SessionDataStore implements DataStore {
             Map<String, Publisher> publishers = registry.get(dataInfoId);
 
             if (publishers == null) {
-                LOGGER.error(
-                    "Delete failed because publisher is not registered for dataInfoId: {}",
+                LOGGER.warn("Delete failed because publisher is not registered for dataInfoId: {}",
                     dataInfoId);
                 return false;
             } else {
                 Publisher publisherTodelete = publishers.remove(registerId);
 
                 if (publisherTodelete == null) {
-                    LOGGER.error(
+                    LOGGER.warn(
                         "Delete failed because publisher is not registered for registerId: {}",
                         registerId);
                     return false;
 
                 } else {
-                    removeIndex(publisherTodelete);
+                    removeFromConnectIndex(publisherTodelete);
                     return true;
                 }
             }
@@ -148,7 +150,6 @@ public class SessionDataStore implements DataStore {
 
     @Override
     public boolean deleteByConnectId(String connectId) {
-
         write.lock();
         try {
             for (Map<String, Publisher> map : registry.values()) {
@@ -157,10 +158,10 @@ public class SessionDataStore implements DataStore {
                     if (publisher != null
                         && connectId.equals(publisher.getSourceAddress().getAddressString())) {
                         it.remove();
-                        invalidateIndex(publisher);
                     }
                 }
             }
+            connectIndex.remove(connectId);
             return true;
         } catch (Exception e) {
             LOGGER.error("Delete publisher by connectId {} error!", connectId, e);
@@ -189,7 +190,7 @@ public class SessionDataStore implements DataStore {
         Map<String, Publisher> publishers = registry.get(dataInfoId);
 
         if (publishers == null) {
-            LOGGER.error("Publisher is not registered for dataInfoId: {}", dataInfoId);
+            LOGGER.warn("Publisher is not registered for dataInfoId: {}", dataInfoId);
             return null;
         }
         return publishers.get(registerId);
@@ -209,14 +210,10 @@ public class SessionDataStore implements DataStore {
         return count.get();
     }
 
-    private void addIndex(Publisher publisher) {
+    private void addToConnectIndex(Publisher publisher) {
+        String connectId = WordCache.getInstance().getWordCache(
+            publisher.getSourceAddress().getAddressString());
 
-        addConnectIndex(publisher);
-    }
-
-    private void addConnectIndex(Publisher publisher) {
-
-        String connectId = publisher.getSourceAddress().getAddressString();
         Map<String/*registerId*/, Publisher> publisherMap = connectIndex.get(connectId);
         if (publisherMap == null) {
             Map<String/*registerId*/, Publisher> newPublisherMap = new ConcurrentHashMap<>();
@@ -229,11 +226,7 @@ public class SessionDataStore implements DataStore {
         publisherMap.put(publisher.getRegisterId(), publisher);
     }
 
-    private void removeIndex(Publisher publisher) {
-        removeConnectIndex(publisher);
-    }
-
-    private void removeConnectIndex(Publisher publisher) {
+    private void removeFromConnectIndex(Publisher publisher) {
         String connectId = publisher.getSourceAddress().getAddressString();
         Map<String/*registerId*/, Publisher> publisherMap = connectIndex.get(connectId);
         if (publisherMap != null) {
@@ -243,13 +236,8 @@ public class SessionDataStore implements DataStore {
         }
     }
 
-    private void invalidateIndex(Publisher publisher) {
-        String connectId = publisher.getSourceAddress().getAddressString();
-        invalidateConnectIndex(connectId);
+    @Override
+    public Map<String, Map<String, Publisher>> getConnectPublishers() {
+        return connectIndex;
     }
-
-    private void invalidateConnectIndex(String connectId) {
-        connectIndex.remove(connectId);
-    }
-
 }

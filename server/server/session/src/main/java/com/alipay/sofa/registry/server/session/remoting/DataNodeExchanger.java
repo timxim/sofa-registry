@@ -16,11 +16,18 @@
  */
 package com.alipay.sofa.registry.server.session.remoting;
 
+import java.util.Collection;
+import java.util.StringJoiner;
+
+import javax.annotation.Resource;
+
+import org.springframework.beans.factory.annotation.Autowired;
+
 import com.alipay.sofa.registry.common.model.Node;
+import com.alipay.sofa.registry.common.model.RenewDatumRequest;
 import com.alipay.sofa.registry.common.model.store.URL;
 import com.alipay.sofa.registry.log.Logger;
 import com.alipay.sofa.registry.log.LoggerFactory;
-import com.alipay.sofa.registry.remoting.Channel;
 import com.alipay.sofa.registry.remoting.ChannelHandler;
 import com.alipay.sofa.registry.remoting.Client;
 import com.alipay.sofa.registry.remoting.exchange.Exchange;
@@ -31,10 +38,6 @@ import com.alipay.sofa.registry.remoting.exchange.message.Response;
 import com.alipay.sofa.registry.server.session.bootstrap.SessionServerConfig;
 import com.alipay.sofa.registry.server.session.node.NodeManager;
 import com.alipay.sofa.registry.server.session.remoting.handler.AbstractClientHandler;
-import org.springframework.beans.factory.annotation.Autowired;
-
-import javax.annotation.Resource;
-import java.util.Collection;
 
 /**
  * The type Data node exchanger.
@@ -69,42 +72,30 @@ public class DataNodeExchanger implements NodeExchanger {
         Response response;
         URL url = request.getRequestUrl();
         try {
-            Client sessionClient = boltExchange.getClient(Exchange.DATA_SERVER_TYPE);
+            Client sessionClient = getClient(url);
 
-            if (sessionClient == null) {
-                LOGGER.warn(
-                        "DataNode Exchanger get dataServer connection {} error! Connection can not be null or disconnected!",
-                        url);
-                //first start session maybe case sessionClient null,try to auto connect
-                sessionClient = boltExchange.connect(Exchange.DATA_SERVER_TYPE, url,
-                        dataClientHandlers.toArray(new ChannelHandler[dataClientHandlers.size()]));
+            // print but ignore if from renew module, cause renew request is too much
+            if (!(request.getRequestBody() instanceof RenewDatumRequest)) {
+                EXCHANGE_LOGGER.info("DataNode Exchanger request={},url={}", request.getRequestBody(), url);
             }
-            //try to connect data
-            Channel channel = sessionClient.getChannel(url);
-            if (channel == null) {
-                channel = sessionClient.connect(url);
-            }
-            EXCHANGE_LOGGER.info("DataNode Exchanger request={},url={}", request.getRequestBody(), url);
 
-            final Object result = sessionClient.sendSync(channel, request.getRequestBody(),
-                    sessionServerConfig.getDataNodeExchangeTimeOut());
+            final Object result = sessionClient
+                    .sendSync(url, request.getRequestBody(), request.getTimeout() != null ? request.getTimeout() : sessionServerConfig.getDataNodeExchangeTimeOut());
             if (result == null) {
-                LOGGER.error("DataNode Exchanger request data get null result!Request url:" + url);
-                throw new RequestException("DataNode Exchanger request data get null result!",
-                        request);
+                throw new RequestException("DataNode Exchanger request data get null result!", request);
             }
             response = () -> result;
         } catch (Exception e) {
-            LOGGER.error("DataNode Exchanger request data error!request={},url={}", request.getRequestBody(), url, e);
-            throw new RequestException("DataNode Exchanger request data error!Request url:" + url,
-                    request, e);
+            LOGGER.error(String.format("Error when request DataNode! Request url=%s, request=%s, msg=%s", url,
+                    request.getRequestBody(), e.getMessage()));
+            throw new RequestException("DataNode Exchanger request data error! Request url:" + url, request, e);
         }
 
         return response;
     }
 
     @Override
-    public Client connectServer() {
+    public synchronized Client connectServer() {
 
         Collection<Node> dataNodes = dataNodeManager.getDataCenterNodes();
         if (dataNodes == null || dataNodes.isEmpty()) {
@@ -112,7 +103,11 @@ public class DataNodeExchanger implements NodeExchanger {
             dataNodes = dataNodeManager.getDataCenterNodes();
         }
 
+        boolean connectedAll = true;
+        StringJoiner errorMsg = new StringJoiner(";");
+
         Client dataClient = null;
+
         for (Node dataNode : dataNodes) {
             if (dataNode.getNodeUrl() == null || dataNode.getNodeUrl().getIpAddress() == null) {
                 LOGGER.error("get data node address error!url{}", dataNode.getNodeUrl());
@@ -122,25 +117,33 @@ public class DataNodeExchanger implements NodeExchanger {
             URL url = new URL(dataNode.getNodeUrl().getIpAddress(),
                 sessionServerConfig.getDataServerPort());
             try {
-                dataClient = boltExchange.getClient(Exchange.DATA_SERVER_TYPE);
-                if (dataClient == null) {
-                    dataClient = boltExchange.connect(Exchange.DATA_SERVER_TYPE, url,
-                        dataClientHandlers.toArray(new ChannelHandler[dataClientHandlers.size()]));
-                }
+                dataClient = getClient(url);
+                // make sure there are connections to DataServer
+                dataClient.connect(url);
             } catch (Exception e) {
-                LOGGER.error("DataNode Exchanger connect DataServer error!url:" + url, e);
+                String msg = "DataNode Exchanger connect DataServer error!url:" + url;
+                LOGGER.error(msg, e);
+                connectedAll = false;
+                errorMsg.add(msg);
                 continue;
             }
+        }
 
-            try {
-                Channel channel = dataClient.getChannel(url);
-                if (channel == null) {
-                    dataClient.connect(url);
-                }
-            } catch (Exception e) {
-                LOGGER.error("DataNode Exchanger connect channel error!url:" + url, e);
-            }
+        if (!connectedAll) {
+            throw new RuntimeException("Data server connected server error: " + errorMsg.toString());
         }
         return dataClient;
     }
+
+    protected Client getClient(URL url) {
+        Client sessionClient = boltExchange.getClient(Exchange.DATA_SERVER_TYPE);
+        if (sessionClient == null) {
+            //first start session maybe case sessionClient null,try to auto connect
+            sessionClient = boltExchange.connect(Exchange.DATA_SERVER_TYPE,
+                sessionServerConfig.getDataClientConnNum(), url,
+                dataClientHandlers.toArray(new ChannelHandler[dataClientHandlers.size()]));
+        }
+        return sessionClient;
+    }
+
 }

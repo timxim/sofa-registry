@@ -16,6 +16,12 @@
  */
 package com.alipay.sofa.registry.server.data.remoting;
 
+import java.util.Collection;
+
+import javax.annotation.Resource;
+
+import org.springframework.beans.factory.annotation.Autowired;
+
 import com.alipay.sofa.registry.common.model.store.URL;
 import com.alipay.sofa.registry.log.Logger;
 import com.alipay.sofa.registry.log.LoggerFactory;
@@ -29,10 +35,6 @@ import com.alipay.sofa.registry.remoting.exchange.message.Response;
 import com.alipay.sofa.registry.server.data.bootstrap.DataServerConfig;
 import com.alipay.sofa.registry.server.data.remoting.handler.AbstractClientHandler;
 import com.alipay.sofa.registry.server.data.remoting.metaserver.IMetaServerService;
-import org.springframework.beans.factory.annotation.Autowired;
-
-import javax.annotation.Resource;
-import java.util.Collection;
 
 /**
  * @author xuanbei
@@ -49,34 +51,29 @@ public class MetaNodeExchanger implements NodeExchanger {
     private IMetaServerService                metaServerService;
 
     @Autowired
-    private DataServerConfig                  dataServerBootstrapConfig;
+    private DataServerConfig                  dataServerConfig;
 
     @Resource(name = "metaClientHandlers")
     private Collection<AbstractClientHandler> metaClientHandlers;
 
     @Override
     public Response request(Request request) {
-        Channel channel = connect(request.getRequestUrl());
         Client client = boltExchange.getClient(Exchange.META_SERVER_TYPE);
         LOGGER.info("MetaNode Exchanger request={},url={},callbackHandler={}", request.getRequestBody(),
                 request.getRequestUrl(), request.getCallBackHandler());
 
         try {
-            final Object result = client.sendSync(channel, request.getRequestBody(),
-                    dataServerBootstrapConfig.getRpcTimeout());
+            final Object result = client.sendSync(request.getRequestUrl(), request.getRequestBody(),
+                    dataServerConfig.getRpcTimeout());
             return () -> result;
         } catch (Exception e) {
             //retry
             URL url = new URL(metaServerService.refreshLeader().getIp(),
-                    dataServerBootstrapConfig.getMetaServerPort());
-            channel = client.getChannel(url);
-            if (channel == null) {
-                channel = client.connect(url);
-            }
+                    dataServerConfig.getMetaServerPort());
             LOGGER.warn("MetaNode Exchanger request send error!It will be retry once!Request url:{}", url);
 
-            final Object result = client.sendSync(channel, request.getRequestBody(),
-                    dataServerBootstrapConfig.getRpcTimeout());
+            final Object result = client.sendSync(url, request.getRequestBody(),
+                    request.getTimeout() != null ? request.getTimeout() : dataServerConfig.getRpcTimeout());
             return () -> result;
         }
     }

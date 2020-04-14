@@ -16,6 +16,10 @@
  */
 package com.alipay.sofa.registry.server.session.remoting.handler;
 
+import java.util.concurrent.Executor;
+
+import org.springframework.beans.factory.annotation.Autowired;
+
 import com.alipay.sofa.registry.common.model.Node.NodeType;
 import com.alipay.sofa.registry.common.model.sessionserver.DataChangeRequest;
 import com.alipay.sofa.registry.log.Logger;
@@ -29,12 +33,10 @@ import com.alipay.sofa.registry.server.session.cache.Key.KeyType;
 import com.alipay.sofa.registry.server.session.scheduler.ExecutorManager;
 import com.alipay.sofa.registry.server.session.store.Interests;
 import com.alipay.sofa.registry.server.session.strategy.DataChangeRequestHandlerStrategy;
-import org.springframework.beans.factory.annotation.Autowired;
-
-import java.util.concurrent.Executor;
 
 /**
  *
+ * @author kezhu.wukz
  * @author shangyu.wh
  * @version $Id: DataChangeRequestHandler.java, v 0.1 2017-12-12 15:09 shangyu.wh Exp $
  */
@@ -81,7 +83,6 @@ public class DataChangeRequestHandler extends AbstractClientHandler {
 
     @Override
     public Object reply(Channel channel, Object message) {
-
         DataChangeRequest dataChangeRequest = (DataChangeRequest) message;
 
         dataChangeRequest.setDataCenter(dataChangeRequest.getDataCenter());
@@ -92,13 +93,14 @@ public class DataChangeRequestHandler extends AbstractClientHandler {
             dataChangeRequest.getDataInfoId(), dataChangeRequest.getDataCenter())));
 
         if (sessionServerConfig.isStopPushSwitch()) {
-            LOGGER.info("Stop Push data with switch on,dataChangeRequest: {}", dataChangeRequest);
             return null;
         }
+
         try {
             boolean result = sessionInterests.checkInterestVersions(
                 dataChangeRequest.getDataCenter(), dataChangeRequest.getDataInfoId(),
                 dataChangeRequest.getVersion());
+
             if (!result) {
                 return null;
             }

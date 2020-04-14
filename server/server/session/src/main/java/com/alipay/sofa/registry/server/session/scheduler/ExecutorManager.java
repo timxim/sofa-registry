@@ -16,25 +16,30 @@
  */
 package com.alipay.sofa.registry.server.session.scheduler;
 
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+
+import org.springframework.beans.factory.annotation.Autowired;
+
+import com.alipay.sofa.registry.log.Logger;
+import com.alipay.sofa.registry.log.LoggerFactory;
 import com.alipay.sofa.registry.metrics.TaskMetrics;
 import com.alipay.sofa.registry.remoting.exchange.NodeExchanger;
 import com.alipay.sofa.registry.server.session.bootstrap.SessionServerConfig;
 import com.alipay.sofa.registry.server.session.node.NodeManager;
 import com.alipay.sofa.registry.server.session.registry.Registry;
 import com.alipay.sofa.registry.task.scheduler.TimedSupervisorTask;
+import com.alipay.sofa.registry.timer.AsyncHashedWheelTimer;
+import com.alipay.sofa.registry.timer.AsyncHashedWheelTimer.TaskFailedCallback;
 import com.alipay.sofa.registry.util.NamedThreadFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-
-import java.util.HashMap;
-import java.util.Map;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
-import java.util.concurrent.SynchronousQueue;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 /**
  *
@@ -43,88 +48,104 @@ import java.util.concurrent.TimeUnit;
  */
 public class ExecutorManager {
 
-    private final ScheduledExecutorService  scheduler;
+    private static final Logger               LOGGER                                     = LoggerFactory
+                                                                                             .getLogger(ExecutorManager.class);
 
-    private final ThreadPoolExecutor        fetchDataExecutor;
-    private final ThreadPoolExecutor        standaloneCheckVersionExecutor;
-    private final ThreadPoolExecutor        renNewDataExecutor;
-    private final ThreadPoolExecutor        getSessionNodeExecutor;
-    private final ThreadPoolExecutor        connectMetaExecutor;
-    private final ThreadPoolExecutor        connectDataExecutor;
+    private final ScheduledThreadPoolExecutor scheduler;
 
-    private final ExecutorService           checkPushExecutor;
-    private final ExecutorService           pushTaskClosureExecutor;
-    private final ThreadPoolExecutor        accessDataExecutor;
-    private final ThreadPoolExecutor        dataChangeRequestExecutor;
-    private final ThreadPoolExecutor        pushTaskExecutor;
-    private final ThreadPoolExecutor        disconnectClientExecutor;
+    private final ThreadPoolExecutor          fetchDataExecutor;
+    private final ThreadPoolExecutor          standaloneCheckVersionExecutor;
+    private final ThreadPoolExecutor          renNewDataExecutor;
+    private final ThreadPoolExecutor          getSessionNodeExecutor;
+    private final ThreadPoolExecutor          connectMetaExecutor;
+    private final ThreadPoolExecutor          connectDataExecutor;
 
-    private SessionServerConfig             sessionServerConfig;
+    private final ExecutorService             checkPushExecutor;
+    private final ThreadPoolExecutor          accessDataExecutor;
+    private final ThreadPoolExecutor          dataChangeRequestExecutor;
+    private final ThreadPoolExecutor          pushTaskExecutor;
+    private final ThreadPoolExecutor          connectClientExecutor;
+    private final ThreadPoolExecutor          publishDataExecutor;
+    private final ThreadPoolExecutor          cleanInvalidClientExecutor;
 
-    @Autowired
-    private Registry                        sessionRegistry;
+    private final AsyncHashedWheelTimer       pushTaskCheckAsyncHashedWheelTimer;
 
-    @Autowired
-    private NodeManager                     sessionNodeManager;
-
-    @Autowired
-    private NodeManager                     dataNodeManager;
+    private SessionServerConfig               sessionServerConfig;
 
     @Autowired
-    private NodeManager                     metaNodeManager;
+    private Registry                          sessionRegistry;
 
     @Autowired
-    protected NodeExchanger                 metaNodeExchanger;
+    private NodeManager                       sessionNodeManager;
 
     @Autowired
-    private NodeExchanger                   dataNodeExchanger;
+    private NodeManager                       dataNodeManager;
 
-    private Map<String, ThreadPoolExecutor> reportExecutors                            = new HashMap<>();
+    @Autowired
+    private NodeManager                       metaNodeManager;
 
-    private static final String             PUSH_TASK_EXECUTOR                         = "PushTaskExecutor";
+    @Autowired
+    protected NodeExchanger                   metaNodeExchanger;
 
-    private static final String             ACCESS_DATA_EXECUTOR                       = "AccessDataExecutor";
+    @Autowired
+    private NodeExchanger                     dataNodeExchanger;
 
-    private static final String             DATA_CHANGE_REQUEST_EXECUTOR               = "DataChangeRequestExecutor";
+    private Map<String, ThreadPoolExecutor>   reportExecutors                            = new HashMap<>();
 
-    private static final String             USER_DATA_ELEMENT_PUSH_TASK_CHECK_EXECUTOR = "UserDataElementPushCheckExecutor";
+    private static final String               PUSH_TASK_EXECUTOR                         = "PushTaskExecutor";
 
-    private static final String             PUSH_TASK_CLOSURE_CHECK_EXECUTOR           = "PushTaskClosureCheckExecutor";
+    private static final String               ACCESS_DATA_EXECUTOR                       = "AccessDataExecutor";
 
-    private static final String             DISCONNECT_CLIENT_EXECUTOR                 = "DisconnectClientExecutor";
+    private static final String               DATA_CHANGE_REQUEST_EXECUTOR               = "DataChangeRequestExecutor";
+
+    private static final String               USER_DATA_ELEMENT_PUSH_TASK_CHECK_EXECUTOR = "UserDataElementPushCheckExecutor";
+
+    private static final String               PUSH_TASK_CLOSURE_CHECK_EXECUTOR           = "PushTaskClosureCheckExecutor";
+
+    private static final String               CONNECT_CLIENT_EXECUTOR                    = "ConnectClientExecutor";
+
+    private static final String               PUBLISH_DATA_EXECUTOR                      = "PublishDataExecutor";
 
     public ExecutorManager(SessionServerConfig sessionServerConfig) {
 
         this.sessionServerConfig = sessionServerConfig;
 
-        scheduler = new ScheduledThreadPoolExecutor(7, new NamedThreadFactory("SessionScheduler"));
+        scheduler = new ScheduledThreadPoolExecutor(sessionServerConfig.getSessionSchedulerPoolSize(),
+                new NamedThreadFactory("SessionScheduler"));
 
-        fetchDataExecutor = new ThreadPoolExecutor(1, 2/*CONFIG*/, 0, TimeUnit.SECONDS,
-                new SynchronousQueue<>(), new NamedThreadFactory("SessionScheduler-fetchData"));
+        fetchDataExecutor = new ThreadPoolExecutor(1, 2/*CONFIG*/, 0, TimeUnit.SECONDS, new SynchronousQueue<>(),
+                new NamedThreadFactory("SessionScheduler-fetchData"));
 
-        renNewDataExecutor = new ThreadPoolExecutor(1, 2/*CONFIG*/, 0, TimeUnit.SECONDS,
-                new SynchronousQueue<>(), new NamedThreadFactory("SessionScheduler-reNewData"));
+        renNewDataExecutor = new ThreadPoolExecutor(1, 2/*CONFIG*/, 0, TimeUnit.SECONDS, new SynchronousQueue<>(),
+                new NamedThreadFactory("SessionScheduler-renewData"));
 
-        getSessionNodeExecutor = new ThreadPoolExecutor(1, 2/*CONFIG*/, 0, TimeUnit.SECONDS,
-                new SynchronousQueue<>(), new NamedThreadFactory("SessionScheduler-getSessionNode"));
+        getSessionNodeExecutor = new ThreadPoolExecutor(1, 2/*CONFIG*/, 0, TimeUnit.SECONDS, new SynchronousQueue<>(),
+                new NamedThreadFactory("SessionScheduler-getSessionNode"));
 
         standaloneCheckVersionExecutor = new ThreadPoolExecutor(1, 2/*CONFIG*/, 0, TimeUnit.SECONDS,
                 new SynchronousQueue<>(), new NamedThreadFactory("SessionScheduler-standaloneCheckVersion"));
 
-        connectMetaExecutor = new ThreadPoolExecutor(1, 2/*CONFIG*/, 0, TimeUnit.SECONDS,
-                new SynchronousQueue<>(), new NamedThreadFactory("SessionScheduler-connectMetaServer"));
+        connectMetaExecutor = new ThreadPoolExecutor(1, 2/*CONFIG*/, 0, TimeUnit.SECONDS, new SynchronousQueue<>(),
+                new NamedThreadFactory("SessionScheduler-connectMetaServer"));
 
-        connectDataExecutor = new ThreadPoolExecutor(1, 2/*CONFIG*/, 0, TimeUnit.SECONDS,
-                new SynchronousQueue<>(), new NamedThreadFactory("SessionScheduler-connectDataServer"));
+        connectDataExecutor = new ThreadPoolExecutor(1, 2/*CONFIG*/, 0, TimeUnit.SECONDS, new SynchronousQueue<>(),
+                new NamedThreadFactory("SessionScheduler-connectDataServer"));
 
-        accessDataExecutor = reportExecutors
-                .computeIfAbsent(ACCESS_DATA_EXECUTOR, k -> new SessionThreadPoolExecutor(ACCESS_DATA_EXECUTOR,
+        cleanInvalidClientExecutor = new ThreadPoolExecutor(1, 2/*CONFIG*/, 0, TimeUnit.SECONDS,
+                new SynchronousQueue<>(), new NamedThreadFactory("SessionScheduler-cleanInvalidClient"));
+
+        accessDataExecutor = reportExecutors.computeIfAbsent(ACCESS_DATA_EXECUTOR,
+                k -> new SessionThreadPoolExecutor(ACCESS_DATA_EXECUTOR,
                         sessionServerConfig.getAccessDataExecutorMinPoolSize(),
                         sessionServerConfig.getAccessDataExecutorMaxPoolSize(),
-                        sessionServerConfig.getAccessDataExecutorKeepAliveTime(),
-                        TimeUnit.SECONDS,
+                        sessionServerConfig.getAccessDataExecutorKeepAliveTime(), TimeUnit.SECONDS,
                         new ArrayBlockingQueue<>(sessionServerConfig.getAccessDataExecutorQueueSize()),
-                        new NamedThreadFactory("AccessData-executor", true)));
+                        new NamedThreadFactory("AccessData-executor", true), (r, executor) -> {
+                    String msg = String
+                            .format("Task(%s) %s rejected from %s, just ignore it to let client timeout.", r.getClass(),
+                                    r, executor);
+                    LOGGER.error(msg);
+                }));
 
         pushTaskExecutor = reportExecutors.computeIfAbsent(PUSH_TASK_EXECUTOR,
                 k -> new ThreadPoolExecutor(sessionServerConfig.getPushTaskExecutorMinPoolSize(),
@@ -139,74 +160,83 @@ public class ExecutorManager {
                 k -> new SessionThreadPoolExecutor(DATA_CHANGE_REQUEST_EXECUTOR,
                         sessionServerConfig.getDataChangeExecutorMinPoolSize(),
                         sessionServerConfig.getDataChangeExecutorMaxPoolSize(),
-                        sessionServerConfig.getDataChangeExecutorKeepAliveTime(),
-                        TimeUnit.SECONDS,
+                        sessionServerConfig.getDataChangeExecutorKeepAliveTime(), TimeUnit.SECONDS,
                         new ArrayBlockingQueue<>(sessionServerConfig.getDataChangeExecutorQueueSize()),
-                        new NamedThreadFactory(
-                                "DataChangeRequestHandler-executor", true)));
+                        new NamedThreadFactory("DataChangeRequestHandler-executor", true)));
 
-        checkPushExecutor = reportExecutors
-                .computeIfAbsent(USER_DATA_ELEMENT_PUSH_TASK_CHECK_EXECUTOR, k -> new SessionThreadPoolExecutor(
-                        USER_DATA_ELEMENT_PUSH_TASK_CHECK_EXECUTOR, 100, 600, 60L,
-                        TimeUnit.SECONDS,
-                        new LinkedBlockingQueue(100000),
+        checkPushExecutor = reportExecutors.computeIfAbsent(USER_DATA_ELEMENT_PUSH_TASK_CHECK_EXECUTOR,
+                k -> new SessionThreadPoolExecutor(USER_DATA_ELEMENT_PUSH_TASK_CHECK_EXECUTOR, 100, 600, 60L,
+                        TimeUnit.SECONDS, new LinkedBlockingQueue(150000),
                         new NamedThreadFactory("UserDataElementPushCheck-executor", true)));
 
-        pushTaskClosureExecutor = reportExecutors
-                .computeIfAbsent(PUSH_TASK_CLOSURE_CHECK_EXECUTOR, k -> new SessionThreadPoolExecutor(
-                        PUSH_TASK_CLOSURE_CHECK_EXECUTOR, 80, 400, 60L,
-                        TimeUnit.SECONDS,
-                        new LinkedBlockingQueue(10000),
-                        new NamedThreadFactory("PushTaskClosureCheck", true)));
+        connectClientExecutor = reportExecutors.computeIfAbsent(CONNECT_CLIENT_EXECUTOR,
+                k -> new SessionThreadPoolExecutor(CONNECT_CLIENT_EXECUTOR,
+                        sessionServerConfig.getConnectClientExecutorMinPoolSize(),
+                        sessionServerConfig.getConnectClientExecutorMaxPoolSize(), 60L, TimeUnit.SECONDS,
+                        new LinkedBlockingQueue(sessionServerConfig.getConnectClientExecutorQueueSize()),
+                        new NamedThreadFactory("DisconnectClientExecutor", true)));
 
-        disconnectClientExecutor = reportExecutors.computeIfAbsent(DISCONNECT_CLIENT_EXECUTOR,k->new SessionThreadPoolExecutor(
-                DISCONNECT_CLIENT_EXECUTOR, sessionServerConfig.getDisconnectClientExecutorMinPoolSize(),
-                sessionServerConfig.getDisconnectClientExecutorMaxPoolSize(), 60L,
-                TimeUnit.SECONDS,
-                new LinkedBlockingQueue(sessionServerConfig.getDisconnectClientExecutorQueueSize()),
-                new NamedThreadFactory("DisconnectClientExecutor", true)));
+        pushTaskCheckAsyncHashedWheelTimer = new AsyncHashedWheelTimer(
+                new NamedThreadFactory("PushTaskConfirmCheck-executor", true),
+                sessionServerConfig.getPushTaskConfirmCheckWheelTicksDuration(), TimeUnit.MILLISECONDS,
+                sessionServerConfig.getPushTaskConfirmCheckWheelTicksSize(),
+                sessionServerConfig.getPushTaskConfirmCheckExecutorThreadSize(),
+                sessionServerConfig.getPushTaskConfirmCheckExecutorQueueSize(),
+                new ThreadFactoryBuilder().setNameFormat("PushTaskConfirmCheck-executor-%d").build(),
+                new TaskFailedCallback() {
+                    @Override
+                    public void executionRejected(Throwable e) {
+                        LOGGER.error("executionRejected: " + e.getMessage(), e);
+                    }
 
+                    @Override
+                    public void executionFailed(Throwable e) {
+                        LOGGER.error("executionFailed: " + e.getMessage(), e);
+                    }
+                });
+        publishDataExecutor = reportExecutors.computeIfAbsent(PUBLISH_DATA_EXECUTOR,
+                k -> new SessionThreadPoolExecutor(PUBLISH_DATA_EXECUTOR,
+                        sessionServerConfig.getPublishDataExecutorMinPoolSize(),
+                        sessionServerConfig.getPublishDataExecutorMaxPoolSize(),
+                        sessionServerConfig.getPublishDataExecutorKeepAliveTime(), TimeUnit.SECONDS,
+                        new ArrayBlockingQueue<>(sessionServerConfig.getPublishDataExecutorQueueSize()),
+                        new NamedThreadFactory("PublishData-executor", true)));
     }
 
     public void startScheduler() {
-        scheduler.schedule(
-                new TimedSupervisorTask("FetchData", scheduler, fetchDataExecutor,
+        scheduler.schedule(new TimedSupervisorTask("FetchData", scheduler, fetchDataExecutor,
                         sessionServerConfig.getSchedulerFetchDataTimeout(), TimeUnit.MINUTES,
-                        sessionServerConfig.getSchedulerFetchDataExpBackOffBound(),
-                        () -> sessionRegistry.fetchChangData()),
+                        sessionServerConfig.getSchedulerFetchDataExpBackOffBound(), () -> sessionRegistry.fetchChangData()),
                 sessionServerConfig.getSchedulerFetchDataFirstDelay(), TimeUnit.SECONDS);
 
-        scheduler.schedule(
-                new TimedSupervisorTask("ReNewData", scheduler, renNewDataExecutor,
+        scheduler.schedule(new TimedSupervisorTask("RenewData", scheduler, renNewDataExecutor,
                         sessionServerConfig.getSchedulerHeartbeatTimeout(), TimeUnit.SECONDS,
-                        sessionServerConfig.getSchedulerHeartbeatExpBackOffBound(),
-                        () -> sessionNodeManager.reNewNode()),
+                        sessionServerConfig.getSchedulerHeartbeatExpBackOffBound(), () -> sessionNodeManager.renewNode()),
                 sessionServerConfig.getSchedulerHeartbeatFirstDelay(), TimeUnit.SECONDS);
 
-        scheduler.schedule(
-                new TimedSupervisorTask("GetSessionNode", scheduler, getSessionNodeExecutor,
-                        sessionServerConfig.getSchedulerGetSessionNodeTimeout(), TimeUnit.SECONDS,
-                        sessionServerConfig.getSchedulerGetSessionNodeExpBackOffBound(),
-                        () -> {
-                            sessionNodeManager.getAllDataCenterNodes();
-                            dataNodeManager.getAllDataCenterNodes();
-                            metaNodeManager.getAllDataCenterNodes();
-                        }),
-                sessionServerConfig.getSchedulerGetSessionNodeFirstDelay(), TimeUnit.SECONDS);
+        scheduler.schedule(new TimedSupervisorTask("GetSessionNode", scheduler, getSessionNodeExecutor,
+                sessionServerConfig.getSchedulerGetSessionNodeTimeout(), TimeUnit.SECONDS,
+                sessionServerConfig.getSchedulerGetSessionNodeExpBackOffBound(), () -> {
+            sessionNodeManager.getAllDataCenterNodes();
+            dataNodeManager.getAllDataCenterNodes();
+            metaNodeManager.getAllDataCenterNodes();
+        }), sessionServerConfig.getSchedulerGetSessionNodeFirstDelay(), TimeUnit.SECONDS);
 
-        scheduler.schedule(
-                new TimedSupervisorTask("ConnectMetaServer", scheduler, connectMetaExecutor,
+        scheduler.schedule(new TimedSupervisorTask("ConnectMetaServer", scheduler, connectMetaExecutor,
                         sessionServerConfig.getSchedulerConnectMetaTimeout(), TimeUnit.SECONDS,
-                        sessionServerConfig.getSchedulerConnectMetaExpBackOffBound(),
-                        () -> metaNodeExchanger.connectServer()),
+                        sessionServerConfig.getSchedulerConnectMetaExpBackOffBound(), () -> metaNodeExchanger.connectServer()),
                 sessionServerConfig.getSchedulerConnectMetaFirstDelay(), TimeUnit.SECONDS);
 
-        scheduler.schedule(
-                new TimedSupervisorTask("ConnectDataServer", scheduler, connectDataExecutor,
+        scheduler.schedule(new TimedSupervisorTask("ConnectDataServer", scheduler, connectDataExecutor,
                         sessionServerConfig.getSchedulerConnectDataTimeout(), TimeUnit.SECONDS,
-                        sessionServerConfig.getSchedulerConnectDataExpBackOffBound(),
-                        () -> dataNodeExchanger.connectServer()),
+                        sessionServerConfig.getSchedulerConnectDataExpBackOffBound(), () -> dataNodeExchanger.connectServer()),
                 sessionServerConfig.getSchedulerConnectDataFirstDelay(), TimeUnit.SECONDS);
+
+        scheduler.schedule(new TimedSupervisorTask("CleanInvalidClient", scheduler, cleanInvalidClientExecutor,
+                        sessionServerConfig.getSchedulerCleanInvalidClientTimeOut(), TimeUnit.MINUTES,
+                        sessionServerConfig.getSchedulerCleanInvalidClientBackOffBound(),
+                        () -> sessionRegistry.cleanClientConnect()),
+                sessionServerConfig.getSchedulerCleanInvalidClientFirstDelay(), TimeUnit.MINUTES);
     }
 
     public void stopScheduler() {
@@ -253,12 +283,12 @@ public class ExecutorManager {
             dataChangeRequestExecutor.shutdown();
         }
 
-        if (pushTaskClosureExecutor != null && !pushTaskClosureExecutor.isShutdown()) {
-            pushTaskClosureExecutor.shutdown();
+        if (connectClientExecutor != null && !connectClientExecutor.isShutdown()) {
+            connectClientExecutor.shutdown();
         }
 
-        if (disconnectClientExecutor != null && !disconnectClientExecutor.isShutdown()) {
-            disconnectClientExecutor.shutdown();
+        if (publishDataExecutor != null && !publishDataExecutor.isShutdown()) {
+            publishDataExecutor.shutdown();
         }
     }
 
@@ -282,12 +312,15 @@ public class ExecutorManager {
         return dataChangeRequestExecutor;
     }
 
-    public ExecutorService getPushTaskClosureExecutor() {
-        return pushTaskClosureExecutor;
+    public ThreadPoolExecutor getConnectClientExecutor() {
+        return connectClientExecutor;
     }
 
-    public ThreadPoolExecutor getDisconnectClientExecutor() {
-        return disconnectClientExecutor;
+    public AsyncHashedWheelTimer getPushTaskCheckAsyncHashedWheelTimer() {
+        return pushTaskCheckAsyncHashedWheelTimer;
     }
 
+    public ThreadPoolExecutor getPublishDataExecutor() {
+        return publishDataExecutor;
+    }
 }

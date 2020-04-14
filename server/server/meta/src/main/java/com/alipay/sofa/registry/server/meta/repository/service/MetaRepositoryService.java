@@ -16,6 +16,16 @@
  */
 package com.alipay.sofa.registry.server.meta.repository.service;
 
+import java.io.IOException;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+
+import org.springframework.beans.factory.annotation.Autowired;
+
 import com.alipay.sofa.registry.common.model.metaserver.MetaNode;
 import com.alipay.sofa.registry.jraft.processor.AbstractSnapshotProcess;
 import com.alipay.sofa.registry.jraft.processor.SnapshotProcess;
@@ -26,15 +36,6 @@ import com.alipay.sofa.registry.server.meta.repository.NodeRepository;
 import com.alipay.sofa.registry.server.meta.repository.RepositoryService;
 import com.alipay.sofa.registry.server.meta.store.RenewDecorate;
 import com.alipay.sofa.registry.store.api.annotation.RaftService;
-import org.springframework.beans.factory.annotation.Autowired;
-
-import java.io.IOException;
-import java.util.HashSet;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  *
@@ -84,7 +85,8 @@ public class MetaRepositoryService extends AbstractSnapshotProcess
     }
 
     @Override
-    public RenewDecorate<MetaNode> put(String ipAddress, RenewDecorate<MetaNode> metaNode) {
+    public RenewDecorate<MetaNode> put(String ipAddress, RenewDecorate<MetaNode> metaNode,
+                                       Long currentTimeMillis) {
         write.lock();
         try {
             String dataCenter = metaNode.getRenewal().getDataCenter();
@@ -92,14 +94,14 @@ public class MetaRepositoryService extends AbstractSnapshotProcess
             NodeRepository<MetaNode> metaNodeRepository = registry.get(dataCenter);
             if (metaNodeRepository == null) {
                 NodeRepository<MetaNode> nodeRepository = new NodeRepository<>(dataCenter,
-                    new ConcurrentHashMap<>(), System.currentTimeMillis());
+                    new ConcurrentHashMap<>(), currentTimeMillis);
                 metaNodeRepository = registry.put(dataCenter, nodeRepository);
                 if (metaNodeRepository == null) {
                     metaNodeRepository = nodeRepository;
                 }
             }
 
-            metaNodeRepository.setVersion(System.currentTimeMillis());
+            metaNodeRepository.setVersion(currentTimeMillis);
 
             Map<String/*ipAddress*/, RenewDecorate<MetaNode>> metaNodes = metaNodeRepository
                 .getNodeMap();
@@ -121,7 +123,7 @@ public class MetaRepositoryService extends AbstractSnapshotProcess
     }
 
     @Override
-    public RenewDecorate<MetaNode> remove(Object key) {
+    public RenewDecorate<MetaNode> remove(Object key, Long currentTimeMillis) {
         write.lock();
         try {
             String ipAddress = (String) key;
@@ -139,7 +141,7 @@ public class MetaRepositoryService extends AbstractSnapshotProcess
                         return null;
                     }
 
-                    metaNodeRepository.setVersion(System.currentTimeMillis());
+                    metaNodeRepository.setVersion(currentTimeMillis);
                     return oldRenewDecorate;
                 }
             }
@@ -153,7 +155,8 @@ public class MetaRepositoryService extends AbstractSnapshotProcess
     }
 
     @Override
-    public RenewDecorate<MetaNode> replace(String ipAddress, RenewDecorate<MetaNode> metaNode) {
+    public RenewDecorate<MetaNode> replace(String ipAddress, RenewDecorate<MetaNode> metaNode,
+                                           Long currentTimeMillis) {
         write.lock();
         try {
             String dataCenter = metaNode.getRenewal().getDataCenter();
@@ -168,9 +171,9 @@ public class MetaRepositoryService extends AbstractSnapshotProcess
                     RenewDecorate<MetaNode> oldRenewDecorate = dataNodes.get(ipAddress);
                     if (oldRenewDecorate != null && oldRenewDecorate.getRenewal() != null) {
                         oldRenewDecorate.setRenewal(metaNode.getRenewal());
-                        oldRenewDecorate.reNew();
+                        oldRenewDecorate.renew();
 
-                        metaNodeRepository.setVersion(System.currentTimeMillis());
+                        metaNodeRepository.setVersion(currentTimeMillis);
                     } else {
                         LOGGER.error("Meta node with ipAddress {} has not existed!", ipAddress);
                         throw new RuntimeException(String.format(

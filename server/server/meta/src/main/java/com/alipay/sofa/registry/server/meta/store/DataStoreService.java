@@ -16,6 +16,21 @@
  */
 package com.alipay.sofa.registry.server.meta.store;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.stream.Collectors;
+
+import org.springframework.beans.factory.annotation.Autowired;
+
 import com.alipay.sofa.registry.common.model.Node.NodeType;
 import com.alipay.sofa.registry.common.model.metaserver.DataCenterNodes;
 import com.alipay.sofa.registry.common.model.metaserver.DataNode;
@@ -36,20 +51,6 @@ import com.alipay.sofa.registry.store.api.annotation.RaftReference;
 import com.alipay.sofa.registry.task.listener.TaskEvent;
 import com.alipay.sofa.registry.task.listener.TaskEvent.TaskType;
 import com.alipay.sofa.registry.task.listener.TaskListenerManager;
-import org.springframework.beans.factory.annotation.Autowired;
-
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
-import java.util.stream.Collectors;
 
 /**
  *
@@ -85,8 +86,6 @@ public class DataStoreService implements StoreService<DataNode> {
     private AtomicLong                                         localDataCenterInitVersion = new AtomicLong(
                                                                                               -1L);
 
-    private static final long                                  COMPARE_TIME_COST          = 1000L;
-
     @Override
     public NodeType getNodeType() {
         return NodeType.DATA;
@@ -103,14 +102,13 @@ public class DataStoreService implements StoreService<DataNode> {
 
         String ipAddress = dataNode.getNodeUrl().getIpAddress();
 
-        long startAll = System.currentTimeMillis();
         write.lock();
         try {
 
             dataRepositoryService.put(ipAddress, new RenewDecorate(dataNode,
                 RenewDecorate.DEFAULT_DURATION_SECS));
 
-            reNew(dataNode, 30);
+            renew(dataNode, 30);
 
             nodeChangeResult = getNodeChangeResult();
 
@@ -118,10 +116,6 @@ public class DataStoreService implements StoreService<DataNode> {
 
         } finally {
             write.unlock();
-        }
-        long cost = System.currentTimeMillis() - startAll;
-        if (cost >= COMPARE_TIME_COST) {
-            LOGGER.info("dataRepositoryService.addNode cost:{} ", cost);
         }
         return nodeChangeResult;
     }
@@ -170,15 +164,14 @@ public class DataStoreService implements StoreService<DataNode> {
     }
 
     @Override
-    public void reNew(DataNode dataNode, int duration) {
+    public void renew(DataNode dataNode, int duration) {
 
-        long startAll = System.currentTimeMillis();
         write.lock();
         try {
             String ipAddress = dataNode.getNodeUrl().getIpAddress();
-            RenewDecorate reNewer = dataRepositoryService.get(ipAddress);
+            RenewDecorate renewer = dataRepositoryService.get(ipAddress);
 
-            if (reNewer == null) {
+            if (renewer == null) {
                 LOGGER.warn("Renew Data node with ipAddress:" + ipAddress
                             + " has not existed!It will be registered again!");
                 addNode(dataNode);
@@ -191,10 +184,6 @@ public class DataStoreService implements StoreService<DataNode> {
                 }
 
             }
-            long cost = System.currentTimeMillis() - startAll;
-            if (cost >= COMPARE_TIME_COST) {
-                LOGGER.info("dataRepositoryService.renew.all cost:{} ", cost);
-            }
         } finally {
             write.unlock();
         }
@@ -206,7 +195,7 @@ public class DataStoreService implements StoreService<DataNode> {
      */
     @Override
     public Collection<DataNode> getExpired() {
-        Collection<DataNode> reNewerList = new ArrayList<>();
+        Collection<DataNode> renewerList = new ArrayList<>();
         read.lock();
         try {
             Map<String, RenewDecorate<DataNode>> dataMap = dataRepositoryService.getAllData();
@@ -216,7 +205,7 @@ public class DataStoreService implements StoreService<DataNode> {
                 String dataCenter = dataNode.getRenewal().getDataCenter();
                 if (dataCenter.equals(nodeConfig.getLocalDataCenter())) {
                     if (dataNode.isExpired()) {
-                        reNewerList.add(dataNode.getRenewal());
+                        renewerList.add(dataNode.getRenewal());
                     }
                 }
             });
@@ -224,7 +213,7 @@ public class DataStoreService implements StoreService<DataNode> {
         } finally {
             read.unlock();
         }
-        return reNewerList;
+        return renewerList;
     }
 
     @Override
@@ -444,6 +433,7 @@ public class DataStoreService implements StoreService<DataNode> {
         }
     }
 
+    //TODO move this code to enterprise version
     @Override
     public void getOtherDataCenterNodeAndUpdate() {
 
@@ -455,38 +445,45 @@ public class DataStoreService implements StoreService<DataNode> {
         if (metaMap != null && metaMap.size() > 0) {
             for (String dataCenter : metaMap.keySet()) {
                 //get other dataCenter dataNodes
-                if (!nodeConfig.getLocalDataCenter().equals(dataCenter)) {
-                    GetChangeListRequest getChangeListRequest = new GetChangeListRequest(
-                        NodeType.DATA, dataCenter);
-                    //trigger fetch dataCenter data list change
-                    DataCenterNodes getDataCenterNodes = metaNodeService
-                        .getDataCenterNodes(getChangeListRequest);
-                    if (getDataCenterNodes != null) {
+                try {
+                    if (!nodeConfig.getLocalDataCenter().equals(dataCenter)) {
+                        GetChangeListRequest getChangeListRequest = new GetChangeListRequest(
+                            NodeType.DATA, dataCenter);
+                        //trigger fetch dataCenter data list change
+                        DataCenterNodes getDataCenterNodes = metaNodeService
+                            .getDataCenterNodes(getChangeListRequest);
+                        LOGGER.info("GetOtherDataCenterNode from DataCenter({}): {}", dataCenter,
+                            getDataCenterNodes);
                         String dataCenterGet = getDataCenterNodes.getDataCenterId();
                         Long version = getDataCenterNodes.getVersion();
                         if (version == null) {
-                            LOGGER.error("Request message version cant not be null!");
-                            return;
+                            LOGGER
+                                .error(
+                                    "getOtherDataCenterNodeAndUpdate from DataCenter({}), data list version is null",
+                                    dataCenter);
+                            continue;
                         }
                         //check for scheduler get other dataCenter data node
                         boolean result = dataRepositoryService.checkVersion(dataCenterGet, version);
                         if (!result) {
-                            if (LOGGER.isDebugEnabled()) {
-                                LOGGER.debug("DataCenter {} data list version {} has not updated!",
+                            LOGGER
+                                .warn(
+                                    "getOtherDataCenterNodeAndUpdate from DataCenter({}), data list version {} has not updated",
                                     dataCenter, version);
-                            }
-                            return;
+                            continue;
                         }
                         updateOtherDataCenterNodes(getDataCenterNodes);
-                    } else {
-                        LOGGER.error("Get DataCenter data nodes change error!null");
-                        throw new RuntimeException("Get null DataCenter data nodes change!");
                     }
+                } catch (Throwable e) {
+                    LOGGER.error(String.format(
+                        "getOtherDataCenterNodeAndUpdate from DataCenter(%s) error: %s",
+                        dataCenter, e.getMessage()), e);
                 }
             }
         }
     }
 
+    //TODO move this to enterprise version
     @Override
     public void updateOtherDataCenterNodes(DataCenterNodes<DataNode> dataCenterNodes) {
         write.lock();

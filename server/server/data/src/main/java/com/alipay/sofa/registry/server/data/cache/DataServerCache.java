@@ -16,17 +16,6 @@
  */
 package com.alipay.sofa.registry.server.data.cache;
 
-import com.alipay.sofa.registry.common.model.metaserver.DataNode;
-import com.alipay.sofa.registry.consistency.hash.ConsistentHash;
-import com.alipay.sofa.registry.log.Logger;
-import com.alipay.sofa.registry.log.LoggerFactory;
-import com.alipay.sofa.registry.server.data.bootstrap.DataServerConfig;
-import com.alipay.sofa.registry.server.data.event.handler.AfterWorkingProcessHandler;
-import com.alipay.sofa.registry.server.data.node.DataNodeStatus;
-import com.alipay.sofa.registry.server.data.util.LocalServerStatusEnum;
-import com.google.common.collect.Sets;
-import org.springframework.beans.factory.annotation.Autowired;
-
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -36,6 +25,21 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+
+import org.springframework.beans.factory.annotation.Autowired;
+
+import com.alipay.sofa.registry.common.model.metaserver.DataNode;
+import com.alipay.sofa.registry.common.model.store.URL;
+import com.alipay.sofa.registry.consistency.hash.ConsistentHash;
+import com.alipay.sofa.registry.log.Logger;
+import com.alipay.sofa.registry.log.LoggerFactory;
+import com.alipay.sofa.registry.server.data.bootstrap.DataServerConfig;
+import com.alipay.sofa.registry.server.data.event.DataServerChangeEvent.FromType;
+import com.alipay.sofa.registry.server.data.event.handler.AfterWorkingProcessHandler;
+import com.alipay.sofa.registry.server.data.node.DataNodeStatus;
+import com.alipay.sofa.registry.server.data.util.LocalServerStatusEnum;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
 
 /**
  * cache of dataservers
@@ -78,7 +82,7 @@ public class DataServerCache {
      * @param newItem
      * @return changedMap(datacenter, serverIp)
      */
-    public Map<String, Set<String>> compareAndSet(DataServerChangeItem newItem) {
+    public Map<String, Set<String>> compareAndSet(DataServerChangeItem newItem, FromType fromType) {
         synchronized (DataServerCache.class) {
             // versionMap: datacenter -> version
             Map<String, Long> newVersionMap = newItem.getVersionMap();
@@ -109,8 +113,8 @@ public class DataServerCache {
                 if (isTheSame.get()) {
                     LOGGER
                         .info(
-                            "current process map has a same version as change map,this change will be ignored!process version={},get version={}",
-                            currentNewVersionMap, newVersionMap);
+                            "current process map has a same version as change map,this change will be ignored!process version={},get version={},from={}",
+                            currentNewVersionMap, newVersionMap, fromType);
                     return new HashMap<>();
                 }
             }
@@ -138,7 +142,8 @@ public class DataServerCache {
                 init(newVersionMap.get(dataServerConfig.getLocalDataCenter()));
             }
             if (!changedMap.isEmpty()) {
-                LOGGER.info("old server map = {}", dataServerChangeItem.getServerMap());
+                LOGGER.info("old server map = {},from={}", dataServerChangeItem.getServerMap(),
+                    fromType);
                 LOGGER.info("new server map = {}", newServerMap);
                 LOGGER.info("new server version map = {}", newVersionMap);
                 LOGGER.info("status map = {}", nodeStatusMap);
@@ -254,8 +259,9 @@ public class DataServerCache {
 
                     LOGGER
                         .info(
-                            "nodeStatusMap not contains all push list,nodeStatusMap {},push {},diff {}",
-                            nodeStatusMap, itemIps, Sets.difference(ips, itemIps));
+                            "nodeStatusMap not contains all push list,nodeStatusMap {},push {},diff1{},diff2{}",
+                            nodeStatusMap, itemIps, Sets.difference(ips, itemIps),
+                            Sets.difference(itemIps, ips));
                     return;
                 }
             } else {
@@ -269,6 +275,11 @@ public class DataServerCache {
             }
 
             dataNodeStatus.setStatus(LocalServerStatusEnum.WORKING);
+
+            //after working update current dataCenter list to old DataServerChangeItem
+            updateItem(
+                newDataServerChangeItem.getServerMap().get(dataServerConfig.getLocalDataCenter()),
+                newVersion, dataServerConfig.getLocalDataCenter());
 
             //after working status,must clean this map,because calculate backupTriad need add not working node,see LocalDataServerChangeEventHandler getToBeSyncMap
             resetStatusMapToWorking();
@@ -363,24 +374,35 @@ public class DataServerCache {
 
     /**
      * calculate ConsistentHash base current data server list
-     * @param dataCenter
-     * @return
+     * do not return null, otherwise will lead to unexpected consequences
+     *
+     * 20200211 update: bugfix: empty dataServerList cause NPE because calculateOldConsistentHash return null
      */
     public ConsistentHash<DataNode> calculateOldConsistentHash(String dataCenter) {
         Map<String, Map<String, DataNode>> dataServerMap = dataServerChangeItem.getServerMap();
         Map<String, DataNode> dataNodeMap = dataServerMap.get(dataCenter);
 
+        Collection<DataNode> dataServerNodes;
         if (dataNodeMap != null && !dataNodeMap.isEmpty()) {
-
-            Collection<DataNode> dataServerNodes = dataNodeMap.values();
-
-            ConsistentHash<DataNode> consistentHash = new ConsistentHash<>(
-                dataServerConfig.getNumberOfReplicas(), dataServerNodes);
-
-            return consistentHash;
+            dataServerNodes = dataNodeMap.values();
         } else {
-            LOGGER.warn("Calculate Old BackupTriad,old dataServer list is empty!");
-            return null;
+            dataServerNodes = Lists.newArrayList(new DataNode(new URL(DataServerConfig.IP),
+                dataCenter));
+            LOGGER
+                .error("[calculateOldConsistentHash] Old dataServer list is empty, add on the local IP");
         }
+        ConsistentHash<DataNode> consistentHash = new ConsistentHash<>(
+            dataServerConfig.getNumberOfReplicas(), dataServerNodes);
+
+        return consistentHash;
+    }
+
+    /**
+     * get all datacenters
+     *
+     * @return
+     */
+    public Set<String> getAllDataCenters() {
+        return newDataServerChangeItem.getVersionMap().keySet();
     }
 }

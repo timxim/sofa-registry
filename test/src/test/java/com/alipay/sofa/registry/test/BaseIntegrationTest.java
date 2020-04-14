@@ -128,7 +128,8 @@ public class BaseIntegrationTest {
     private static void initRegistryClientAndChannel() {
         if (registryClient1 == null) {
             RegistryClientConfig config = DefaultRegistryClientConfigBuilder.start()
-                .setAppName("testApp1").setDataCenter(LOCAL_DATACENTER).setZone(LOCAL_REGION)
+                .setSyncConfigRetryInterval(60000).setAppName("testApp1")
+                .setDataCenter(LOCAL_DATACENTER).setZone(LOCAL_REGION)
                 .setRegistryEndpoint(LOCAL_ADDRESS).setRegistryEndpointPort(sessionPort).build();
             registryClient1 = new DefaultRegistryClient(config);
             registryClient1.init();
@@ -183,12 +184,13 @@ public class BaseIntegrationTest {
     }
 
     protected static void clearData() throws Exception {
-        DatumCache.getAll().clear();
+        DatumCache datumCache = (DatumCache) dataApplicationContext.getBean("datumCache");
+        datumCache.getAll().clear();
         List<String> connectIds = new ArrayList<>(Arrays.asList(
             NetUtil.genHost(LOCAL_ADDRESS, getSourcePort(registryClient1)),
             NetUtil.genHost(LOCAL_ADDRESS, getSourcePort(registryClient2))));
         for (String connectId : connectIds) {
-            Map<String, Publisher> publisherMap = DatumCache.getByHost(connectId);
+            Map<String, Publisher> publisherMap = datumCache.getByConnectId(connectId);
             if (publisherMap != null) {
                 publisherMap.clear();
             }

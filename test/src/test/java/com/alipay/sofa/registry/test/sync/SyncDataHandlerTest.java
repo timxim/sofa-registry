@@ -51,11 +51,13 @@ public class SyncDataHandlerTest extends BaseIntegrationTest {
         String value = "test publish";
         PublisherRegistration registration = new PublisherRegistration(dataId);
         registryClient1.register(registration, value);
-        Thread.sleep(500L);
+        Thread.sleep(2000L);
 
         // request syncData
         DataNodeExchanger dataNodeExchanger = dataApplicationContext.getBean("dataNodeExchanger",
             DataNodeExchanger.class);
+        URL url = new URL(LOCAL_ADDRESS, syncDataPort);
+        dataNodeExchanger.connect(url);
         GenericResponse genericResponse = (GenericResponse) dataNodeExchanger.request(
             new Request() {
                 @Override
@@ -67,7 +69,7 @@ public class SyncDataHandlerTest extends BaseIntegrationTest {
 
                 @Override
                 public URL getRequestUrl() {
-                    return new URL(LOCAL_ADDRESS, syncDataPort);
+                    return url;
                 }
             }).getResult();
 

@@ -16,27 +16,37 @@
  */
 package com.alipay.sofa.registry.server.data.event;
 
-import com.alipay.sofa.registry.common.model.metaserver.DataNode;
-import com.alipay.sofa.registry.server.data.cache.DataServerChangeItem;
-
 import java.util.HashMap;
 import java.util.Map;
+
+import com.alipay.sofa.registry.common.model.metaserver.DataNode;
+import com.alipay.sofa.registry.server.data.cache.DataServerChangeItem;
 
 /**
  *
  * @author qian.lqlq
  * @version $Id: DataServerChangeEvent.java, v 0.1 2018-03-13 14:37 qian.lqlq Exp $
  */
-public class DataServerChangeEvent {
+public class DataServerChangeEvent implements Event {
+
+    /**
+     * node type enum
+     */
+    public enum FromType {
+        CONNECT_TASK, META_NOTIFY, REGISTER_META
+    }
 
     private DataServerChangeItem dataServerChangeItem;
+
+    private FromType             fromType;
 
     /**
      * constructor
      * @param dataServerChangeItem
      */
-    public DataServerChangeEvent(DataServerChangeItem dataServerChangeItem) {
+    public DataServerChangeEvent(DataServerChangeItem dataServerChangeItem, FromType fromType) {
         this.dataServerChangeItem = dataServerChangeItem;
+        this.fromType = fromType;
     }
 
     /**
@@ -45,7 +55,7 @@ public class DataServerChangeEvent {
      * @param versionMap
      */
     public DataServerChangeEvent(Map<String, Map<String, DataNode>> serverMap,
-                                 Map<String, Long> versionMap) {
+                                 Map<String, Long> versionMap, FromType fromType) {
         if (serverMap == null) {
             serverMap = new HashMap<>();
         }
@@ -53,6 +63,8 @@ public class DataServerChangeEvent {
             versionMap = new HashMap<>();
         }
         this.dataServerChangeItem = new DataServerChangeItem(serverMap, versionMap);
+
+        this.fromType = fromType;
     }
 
     /**
@@ -62,5 +74,14 @@ public class DataServerChangeEvent {
      */
     public DataServerChangeItem getDataServerChangeItem() {
         return dataServerChangeItem;
+    }
+
+    /**
+     * Getter method for property <tt>fromType</tt>.
+     *
+     * @return property value of fromType
+     */
+    public FromType getFromType() {
+        return fromType;
     }
 }

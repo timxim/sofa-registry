@@ -17,6 +17,10 @@
 package com.alipay.sofa.registry.common.model.metaserver;
 
 import java.io.Serializable;
+import java.util.Set;
+
+import com.alipay.sofa.registry.common.model.Node.NodeType;
+import com.google.common.collect.Sets;
 
 /**
  *
@@ -25,11 +29,13 @@ import java.io.Serializable;
  */
 public class NotifyProvideDataChange implements Serializable {
 
-    private String       dataInfoId;
+    private String        dataInfoId;
 
-    private Long         version;
+    private Long          version;
 
-    private DataOperator dataOperator;
+    private DataOperator  dataOperator;
+
+    private Set<NodeType> nodeTypes;
 
     /**
      * constructor
@@ -38,9 +44,15 @@ public class NotifyProvideDataChange implements Serializable {
      * @param dataOperator
      */
     public NotifyProvideDataChange(String dataInfoId, Long version, DataOperator dataOperator) {
+        this(dataInfoId, version, dataOperator, Sets.newHashSet(NodeType.SESSION));
+    }
+
+    public NotifyProvideDataChange(String dataInfoId, Long version, DataOperator dataOperator,
+                                   Set<NodeType> nodeTypes) {
         this.dataInfoId = dataInfoId;
         this.version = version;
         this.dataOperator = dataOperator;
+        this.nodeTypes = nodeTypes;
     }
 
     /**
@@ -97,12 +109,31 @@ public class NotifyProvideDataChange implements Serializable {
         this.dataOperator = dataOperator;
     }
 
+    /**
+     * Getter method for property <tt>nodeType</tt>.
+     *
+     * @return property value of nodeType
+     */
+    public Set<NodeType> getNodeTypes() {
+        return nodeTypes;
+    }
+
+    /**
+     * Setter method for property <tt>nodeType</tt>.
+     *
+     * @param nodeTypes  value to be assigned to property nodeType
+     */
+    public void setNodeTypes(Set<NodeType> nodeTypes) {
+        this.nodeTypes = nodeTypes;
+    }
+
     @Override
     public String toString() {
         final StringBuilder sb = new StringBuilder("NotifyProvideDataChange{");
         sb.append("dataInfoId='").append(dataInfoId).append('\'');
         sb.append(", version=").append(version);
         sb.append(", dataOperator=").append(dataOperator);
+        sb.append(", nodeTypes=").append(nodeTypes);
         sb.append('}');
         return sb.toString();
     }

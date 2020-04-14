@@ -16,26 +16,27 @@
  */
 package com.alipay.sofa.registry.server.session.scheduler.task;
 
-import com.alipay.sofa.registry.common.model.dataserver.SessionServerRegisterRequest;
-import com.alipay.sofa.registry.common.model.store.URL;
-import com.alipay.sofa.registry.log.Logger;
-import com.alipay.sofa.registry.log.LoggerFactory;
-import com.alipay.sofa.registry.net.NetUtil;
-import com.alipay.sofa.registry.remoting.Channel;
-import com.alipay.sofa.registry.remoting.Server;
-import com.alipay.sofa.registry.remoting.exchange.Exchange;
-import com.alipay.sofa.registry.server.session.bootstrap.SessionServerConfig;
-import com.alipay.sofa.registry.server.session.node.SessionProcessIdGenerator;
-import com.alipay.sofa.registry.server.session.node.service.DataNodeService;
-import com.alipay.sofa.registry.task.listener.TaskEvent;
-
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Set;
 
+import com.alipay.sofa.registry.common.model.dataserver.SessionServerRegisterRequest;
+import com.alipay.sofa.registry.log.Logger;
+import com.alipay.sofa.registry.log.LoggerFactory;
+import com.alipay.sofa.registry.net.NetUtil;
+import com.alipay.sofa.registry.remoting.Channel;
+import com.alipay.sofa.registry.remoting.Client;
+import com.alipay.sofa.registry.remoting.Server;
+import com.alipay.sofa.registry.remoting.bolt.BoltChannel;
+import com.alipay.sofa.registry.remoting.exchange.Exchange;
+import com.alipay.sofa.registry.server.session.bootstrap.SessionServerConfig;
+import com.alipay.sofa.registry.server.session.node.SessionProcessIdGenerator;
+import com.alipay.sofa.registry.task.listener.TaskEvent;
+
 /**
  *
  * @author shangyu.wh
+ * @author kezhu.wukz
  * @version $Id: SessionRegisterDataTask.java, v 0.1 2018-04-16 16:07 shangyu.wh Exp $
  */
 public class SessionRegisterDataTask extends AbstractSessionTask {
@@ -44,16 +45,13 @@ public class SessionRegisterDataTask extends AbstractSessionTask {
                                                     SessionRegisterDataTask.class, "[Task]");
 
     private final Exchange               boltExchange;
-    private final DataNodeService        dataNodeService;
     private final SessionServerConfig    sessionServerConfig;
 
     private SessionServerRegisterRequest sessionServerRegisterRequest;
-    private URL                          dataUrl;
+    private BoltChannel                  channel;
 
-    public SessionRegisterDataTask(Exchange boltExchange, DataNodeService dataNodeService,
-                                   SessionServerConfig sessionServerConfig) {
+    public SessionRegisterDataTask(Exchange boltExchange, SessionServerConfig sessionServerConfig) {
         this.boltExchange = boltExchange;
-        this.dataNodeService = dataNodeService;
         this.sessionServerConfig = sessionServerConfig;
     }
 
@@ -72,9 +70,8 @@ public class SessionRegisterDataTask extends AbstractSessionTask {
 
         Object obj = taskEvent.getEventObj();
 
-        if (obj instanceof URL) {
-
-            this.dataUrl = (URL) obj;
+        if (obj instanceof BoltChannel) {
+            this.channel = (BoltChannel) obj;
 
         } else {
             throw new IllegalArgumentException("Input task event object error!");
@@ -84,11 +81,11 @@ public class SessionRegisterDataTask extends AbstractSessionTask {
         if (sessionServer != null) {
 
             Collection<Channel> chs = sessionServer.getChannels();
-            Set<String> clientHosts = new HashSet<>();
-            chs.forEach(channel -> clientHosts.add(NetUtil.toAddressString(channel.getRemoteAddress())));
+            Set<String> connectIds = new HashSet<>();
+            chs.forEach(channel -> connectIds.add(NetUtil.toAddressString(channel.getRemoteAddress())));
 
             sessionServerRegisterRequest = new SessionServerRegisterRequest(
-                    SessionProcessIdGenerator.getSessionProcessId(), clientHosts);
+                    SessionProcessIdGenerator.getSessionProcessId(), connectIds);
         } else {
             LOGGER.error("get null session server,please check server started before register!port {}",
                     sessionServerConfig.getServerPort());
@@ -99,14 +96,39 @@ public class SessionRegisterDataTask extends AbstractSessionTask {
 
     @Override
     public void execute() {
-        dataNodeService.registerSessionProcessId(sessionServerRegisterRequest, dataUrl);
+        if (!channel.isConnected()) {
+            return;
+        }
+
+        Client sessionClient = boltExchange.getClient(Exchange.DATA_SERVER_TYPE);
+        try {
+            sessionClient.sendSync(channel, sessionServerRegisterRequest,
+                sessionServerConfig.getDataNodeExchangeTimeOut());
+        } catch (Exception e) {
+            if (isLastRetry()) {
+                LOGGER
+                    .error(
+                        "Register to DataServer({}/{}:{}) error for multiple times, so close this channel (let bolt reconnect it)",
+                        channel.getLocalAddress(), channel.getRemoteAddress().getHostString(),
+                        channel.getRemoteAddress().getPort());
+                channel.close();
+            }
+            throw e;
+        }
+
+    }
+
+    protected boolean isLastRetry() {
+        return getExecCount() >= sessionServerConfig.getSessionRegisterDataServerTaskRetryTimes();
     }
 
     @Override
     public String toString() {
         return "SESSION_REGISTER_DATA_TASK{" + "taskId='" + taskId + '\''
                + ", sessionServerRegisterRequest=" + sessionServerRegisterRequest.getProcessId()
-               + ", clientList=" + sessionServerRegisterRequest.getClientHosts().size()
-               + ", dataUrl=" + dataUrl + '}';
+               + ", clientList=" + sessionServerRegisterRequest.getConnectIds().size()
+               + ", channel=" + channel.getLocalAddress() + "/"
+               + channel.getRemoteAddress().getHostString() + ':'
+               + channel.getRemoteAddress().getPort() + '}';
     }
 }
